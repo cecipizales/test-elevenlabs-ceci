@@ -5,12 +5,12 @@ export enum ConnectionState {
   ERROR = 'ERROR',
 }
 
-export enum MusicGenre {
-  LOFI = 'lofi',
-  CLASSICAL = 'classical',
-  JAZZ = 'jazz',
-  AMBIENT = 'ambient',
-  NONE = 'none',
+export enum CallState {
+  IDLE = 'IDLE',
+  DIALING = 'DIALING',
+  AI_SPEAKING = 'AI_SPEAKING',
+  USER_SPEAKING = 'USER_SPEAKING',
+  REPLY_READY = 'REPLY_READY',
 }
 
 export interface Task {
@@ -26,8 +26,7 @@ export interface TimerState {
   mode: 'focus' | 'break';
 }
 
-export interface RadioState {
-  isMuted: boolean;
-  currentTrack: string | null;
-  volume: number;
+export interface ElevenLabsConfig {
+  apiKey: string;
+  voiceId: string;
 }
