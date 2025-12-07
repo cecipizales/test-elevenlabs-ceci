@@ -1,0 +1,8 @@
+{
+  "name": "Focus FM",
+  "description": "Your personal AI radio host for deep work and study sessions. Features live voice interaction, focus timers, and dynamic company.",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation"
+  ]
+}
