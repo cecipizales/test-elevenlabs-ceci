@@ -6,10 +6,7 @@ interface TopicSuggestionsProps {
   onClose: () => void;
 }
 
-const TopicSuggestions: React.FC<TopicSuggestionsProps> = ({ isOpen, onClose }) => {
-  if (!isOpen) return null;
-
-  const categories = [
+const categories = [
     {
       icon: <Music size={16} />,
       title: "Music Requests",
@@ -41,6 +38,9 @@ const TopicSuggestions: React.FC<TopicSuggestionsProps> = ({ isOpen, onClose }) 
       ]
     }
   ];
+
+const TopicSuggestions: React.FC<TopicSuggestionsProps> = ({ isOpen, onClose }) => {
+  if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4" onClick={onClose}>

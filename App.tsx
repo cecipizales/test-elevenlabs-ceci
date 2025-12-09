@@ -7,8 +7,14 @@ import MusicPlayer from './components/MusicPlayer';
 import Tasks from './components/Tasks';
 import SettingsModal from './components/SettingsModal';
 import TopicSuggestions from './components/TopicSuggestions';
-import { Phone, Radio as RadioIcon, Volume2, Settings, Lightbulb } from 'lucide-react';
+import { Phone, Radio as RadioIcon, Volume2, Settings, Lightbulb, Mic } from 'lucide-react';
 import clsx from 'clsx';
+
+// --- CONFIGURATION ---
+const DEFAULT_EL_CONFIG: ElevenLabsConfig | null = {
+  apiKey: "e2ab0876249b32ae3f0848aff1f7c5aee5baa6474f4b5ef59ef6931efb531b52",
+  voiceId: "ucgJ8SdlW1CZr9MIm8BP"
+};
 
 type AppView = 'landing' | 'tuning' | 'radio';
 
@@ -16,24 +22,26 @@ const App: React.FC = () => {
   const [view, setView] = useState<AppView>('landing');
   const [tuningFreq, setTuningFreq] = useState(87.5);
   
-  // Radio State
   const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.DISCONNECTED);
   const [callState, setCallState] = useState<CallState>(CallState.IDLE);
   
-  // App Logic State
   const [timerState, setTimerState] = useState<TimerState>({ isActive: false, timeLeft: 0, duration: 0, mode: 'focus' });
   const [isMusicPlaying, setIsMusicPlaying] = useState(false); 
   const [userVolume, setUserVolume] = useState(70);
+  const [musicGenStatus, setMusicGenStatus] = useState<'idle' | 'generating' | 'error'>('idle');
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [locationInfo, setLocationInfo] = useState<string>('Unknown Location');
   
-  // Settings & Ideas
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isIdeasOpen, setIsIdeasOpen] = useState(false);
   const [elConfig, setElConfig] = useState<ElevenLabsConfig | null>(() => {
       const saved = localStorage.getItem('focus_fm_el_config');
-      return saved ? JSON.parse(saved) : null;
+      if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed.apiKey === DEFAULT_EL_CONFIG?.apiKey) return parsed;
+      }
+      return DEFAULT_EL_CONFIG;
   });
 
   const serviceRef = useRef<GeminiLiveService | null>(null);
@@ -41,20 +49,15 @@ const App: React.FC = () => {
   const lofiSynthRef = useRef<LoFiSynth | null>(null);
   const chimeIntervalRef = useRef<number | null>(null);
   const phraseIntervalRef = useRef<number | null>(null);
+  
+  const stopRingRef = useRef<(() => void) | null>(null);
 
-  // Refs for state access in async callbacks/intervals to avoid stale closures
   const callStateRef = useRef(callState);
   const connectionStateRef = useRef(connectionState);
 
-  useEffect(() => {
-    callStateRef.current = callState;
-  }, [callState]);
+  useEffect(() => { callStateRef.current = callState; }, [callState]);
+  useEffect(() => { connectionStateRef.current = connectionState; }, [connectionState]);
 
-  useEffect(() => {
-    connectionStateRef.current = connectionState;
-  }, [connectionState]);
-
-  // Initialize Geolocation
   useEffect(() => {
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
@@ -64,14 +67,12 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Update Synth Volume
   useEffect(() => {
       if (lofiSynthRef.current) {
           lofiSynthRef.current.setMasterVolume(userVolume / 100);
       }
   }, [userVolume]);
 
-  // Global Ducking Logic: If calling/talking/listening, lower the music
   useEffect(() => {
       if (lofiSynthRef.current) {
           const shouldDuck = callState !== CallState.IDLE;
@@ -91,10 +92,11 @@ const App: React.FC = () => {
       }
   };
 
-  // --- Tuning Logic ---
   const startTuning = () => {
-    audioFxRef.current = new AudioSynthesizer();
-    lofiSynthRef.current = new LoFiSynth(audioFxRef.current.ctx);
+    if (!audioFxRef.current) {
+        audioFxRef.current = new AudioSynthesizer();
+        lofiSynthRef.current = new LoFiSynth(audioFxRef.current.ctx);
+    }
     
     setView('tuning');
     audioFxRef.current.playStaticNoise(4.5); 
@@ -123,7 +125,6 @@ const App: React.FC = () => {
     requestAnimationFrame(animate);
   };
 
-  // --- Gemini Connection ---
   const handleConnect = async () => {
     setConnectionState(ConnectionState.CONNECTING);
     
@@ -131,15 +132,25 @@ const App: React.FC = () => {
     const service = new GeminiLiveService();
     serviceRef.current = service;
 
-    // Speaker Activity is now handled mainly for State, ducking is handled by useEffect on callState
+    if (lofiSynthRef.current) {
+        lofiSynthRef.current.start();
+        setIsMusicPlaying(true);
+    }
+
     service.onSpeakerActivity = (active, source) => {
+        if (stopRingRef.current) {
+            stopRingRef.current();
+            stopRingRef.current = null;
+        }
+
         if (source === 'ai') {
             if (active) {
                 setCallState(CallState.AI_SPEAKING);
-                service.setMicMuted(true); 
             } else {
                 setCallState(CallState.REPLY_READY);
             }
+        } else if (source === 'user' && active) {
+            setCallState(CallState.USER_SPEAKING);
         }
     };
 
@@ -153,9 +164,34 @@ const App: React.FC = () => {
         setTimerState(prev => ({ ...prev, isActive: false }));
         return { success: true };
       }
-      if (name === 'setMusicStyle') {
-          const style = args.style || 'lofi';
-          lofiSynthRef.current?.setMusicStyle(style);
+      if (name === 'generateMusic') {
+          console.log("Music Request:", args);
+          
+          if (serviceRef.current?.elClient && args.prompt) {
+              setMusicGenStatus('generating');
+              console.log("Attempting ElevenLabs Music Generation for:", args.prompt);
+              
+              const buffer = await serviceRef.current.elClient.generateSoundLoop(args.prompt);
+              
+              if (buffer && lofiSynthRef.current) {
+                  lofiSynthRef.current.setExternalLoop(buffer);
+                  setMusicGenStatus('idle');
+                  return { success: true };
+              } else {
+                  console.error("ElevenLabs Generation Failed. Falling back.");
+                  setMusicGenStatus('error');
+                  setTimeout(() => setMusicGenStatus('idle'), 3000);
+              }
+          }
+
+          console.log("Fallback to Internal Synth");
+          lofiSynthRef.current?.configure({
+              bpm: typeof args.bpm === 'number' ? args.bpm : 60,
+              waveform: ['sine', 'triangle', 'square', 'sawtooth'].includes(args.waveform) ? args.waveform : 'triangle',
+              filterFreq: typeof args.filterFreq === 'number' ? args.filterFreq : 800,
+              arpeggio: typeof args.arpeggio === 'boolean' ? args.arpeggio : false,
+              drums: typeof args.drums === 'boolean' ? args.drums : true,
+          });
           return { success: true };
       }
       if (name === 'stopMusic') {
@@ -164,7 +200,7 @@ const App: React.FC = () => {
           return { success: true };
       }
       if (name === 'addTask') {
-          setTasks(p => [...p, { id: Date.now().toString(), text: args.task, completed: false }]);
+          setTasks(p => [...p, { id: Date.now().toString(), text: args.task || 'New Task', completed: false }]);
           return { success: true };
       }
       return { success: false };
@@ -173,8 +209,6 @@ const App: React.FC = () => {
     try {
         await service.connect(locationInfo, elConfig || undefined);
         setConnectionState(ConnectionState.CONNECTED);
-        lofiSynthRef.current?.start();
-        setIsMusicPlaying(true);
         setupLoops();
     } catch (err) {
         console.error(err);
@@ -193,50 +227,50 @@ const App: React.FC = () => {
 
       if (phraseIntervalRef.current) clearInterval(phraseIntervalRef.current);
       phraseIntervalRef.current = window.setInterval(() => {
-         // Using refs here ensures we don't capture stale state in the closure
          if (callStateRef.current === CallState.IDLE && connectionStateRef.current === ConnectionState.CONNECTED) {
              serviceRef.current?.sendText("Say a very short station ID phrase like 'You're listening to Focus FM' or 'Midnight vibes' over the music. Don't ask a question.");
          }
       }, 8 * 60 * 1000); 
   };
 
-  // --- Main Interaction Button ---
-  const handleMainButton = () => {
+  const handleDial = () => {
       serviceRef.current?.resumeAudio();
       if (audioFxRef.current?.ctx.state === 'suspended') audioFxRef.current.ctx.resume();
 
       if (connectionState !== ConnectionState.CONNECTED) return;
-
-      if (callState === CallState.IDLE) {
-          setCallState(CallState.DIALING);
-          audioFxRef.current?.playPhoneRing();
-          
-          setTimeout(() => {
-             // Use ref to check latest state to avoid TS narrowing error and stale closure
-             if (callStateRef.current === CallState.DIALING) {
-                 setCallState(CallState.IDLE);
-             }
-          }, 6000);
-
-          setTimeout(() => {
-              serviceRef.current?.startCall();
-          }, 1500);
-
-      } else if (callState === CallState.REPLY_READY) {
-          setCallState(CallState.USER_SPEAKING);
-          serviceRef.current?.setMicMuted(false);
-
-      } else if (callState === CallState.USER_SPEAKING) {
-          setCallState(CallState.REPLY_READY);
-          serviceRef.current?.setMicMuted(true);
-
-      } else {
-          setCallState(CallState.IDLE);
-          serviceRef.current?.endCall();
+      if (callState !== CallState.IDLE) {
+          handleHangup();
+          return;
       }
+
+      setCallState(CallState.DIALING);
+      
+      serviceRef.current?.startCall();
+
+      audioFxRef.current?.playDTMFSequence();
+      
+      if (stopRingRef.current) stopRingRef.current(); 
+      stopRingRef.current = audioFxRef.current?.playPhoneRing(0.65) || null;
+
+      setTimeout(() => {
+         if (callStateRef.current === CallState.DIALING) {
+             if (stopRingRef.current) {
+                 stopRingRef.current();
+                 stopRingRef.current = null;
+             }
+             setCallState(CallState.IDLE);
+         }
+      }, 15000);
   };
 
-  // --- Views ---
+  const handleHangup = () => {
+      setCallState(CallState.IDLE);
+      serviceRef.current?.endCall();
+      if (stopRingRef.current) {
+          stopRingRef.current();
+          stopRingRef.current = null;
+      }
+  };
 
   if (view === 'landing') {
       return (
@@ -329,6 +363,7 @@ const App: React.FC = () => {
                               <MusicPlayer 
                                   isPlaying={isMusicPlaying} 
                                   synthAnalyser={lofiSynthRef.current?.analyser}
+                                  generationStatus={musicGenStatus}
                               />
                           </div>
                           <div className="relative z-30 flex flex-col justify-between h-full p-4 pointer-events-none">
@@ -384,24 +419,29 @@ const App: React.FC = () => {
                         </button>
                       </div>
 
-                      <div className="relative group">
+                      <div className="relative group flex flex-col items-center gap-4">
+                          
+                          {/* MAIN ACTION BUTTON */}
                           <button 
-                             onClick={handleMainButton}
+                             onClick={handleDial}
                              disabled={connectionState === ConnectionState.CONNECTING}
                              className={clsx(
-                                 "w-24 h-24 rounded-full border-4 shadow-xl flex items-center justify-center transition-all duration-300 active:scale-95 relative overflow-hidden",
-                                 (callState === CallState.IDLE || callState === CallState.REPLY_READY)
-                                    ? "bg-[#1a120b] border-[#3d291a] hover:border-amber-700"
-                                    : "bg-amber-500 border-amber-300 shadow-[0_0_30px_rgba(245,158,11,0.4)]"
+                                 "w-24 h-24 rounded-full border-4 shadow-xl flex items-center justify-center transition-all duration-150 relative overflow-hidden select-none",
+                                 (callState === CallState.IDLE)
+                                    ? "bg-[#1a120b] border-[#3d291a] hover:border-amber-700 active:scale-95 cursor-pointer" // Dialing style
+                                    : "bg-red-600 border-red-400 shadow-[0_0_30px_red] cursor-pointer" // Hangup style
                              )}
                           >
                               {connectionState === ConnectionState.CONNECTING && (
                                   <div className="absolute inset-0 bg-amber-500/20 animate-pulse flex items-center justify-center text-[10px] font-bold">INIT...</div>
                               )}
                               
-                              <Phone size={32} className={clsx("transition-colors relative z-10", 
-                                  callState !== CallState.IDLE && callState !== CallState.REPLY_READY ? "text-black fill-current" : "text-amber-700"
-                              )} />
+                              {/* Icons */}
+                              {callState === CallState.IDLE ? (
+                                  <Phone size={32} className="text-amber-700" />
+                              ) : (
+                                  <Phone size={32} className="text-white rotate-135" /> // Rotate for hangup visual
+                              )}
                           </button>
                           
                           <div className={clsx(
@@ -412,13 +452,15 @@ const App: React.FC = () => {
 
                       <div className="text-center space-y-1">
                           <div className="text-amber-700 font-bold uppercase tracking-widest text-xs">
-                              {callState === CallState.IDLE ? 'Call Station' : 
+                              {callState === CallState.IDLE ? 'Tap to Call' : 
                                callState === CallState.DIALING ? 'Dialing...' :
-                               callState === CallState.AI_SPEAKING ? 'On Air (Listening)' :
-                               callState === CallState.REPLY_READY ? 'Line Open' : 'On Air (Speaking)'}
+                               callState === CallState.USER_SPEAKING ? 'TRANSMITTING' :
+                               'Live on Air'}
                           </div>
                           <div className="text-amber-900/40 text-[10px] font-mono">
-                              {callState === CallState.REPLY_READY ? 'PRESS TO REPLY' : 'PUSH TO TALK'}
+                              {callState === CallState.IDLE ? 'START BROADCAST' : 
+                               callState === CallState.DIALING ? 'CONNECTING...' :
+                               'MIC OPEN'}
                           </div>
                       </div>
                   </div>

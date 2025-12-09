@@ -3,7 +3,6 @@ import { createPcmBlob, decodeAudioData, base64ToUint8Array } from '../utils/aud
 import { ElevenLabsConfig } from '../types';
 import { ElevenLabsClient } from '../utils/elevenLabs';
 
-// Tools definitions
 const toolsDefinition = [
   {
     functionDeclarations: [
@@ -24,14 +23,19 @@ const toolsDefinition = [
         parameters: { type: Type.OBJECT, properties: {} },
       },
       {
-        name: 'setMusicStyle',
-        description: 'Change the generative music style/genre. Supported: lofi, rock, techno, classical, ambient.',
+        name: 'generateMusic',
+        description: 'Generate music. You MUST provide a "prompt" for the AI music generator if you want high-quality audio.',
         parameters: {
           type: Type.OBJECT,
           properties: {
-            style: { type: Type.STRING, description: 'The genre or style to switch to.' },
+            prompt: { type: Type.STRING, description: 'A descriptive text prompt for the music generator (e.g., "upbeat lofi hip hop beat", "sad piano melody", "cyberpunk techno loop"). REQUIRED for high quality music.' },
+            bpm: { type: Type.NUMBER, description: 'Tempo in Beats Per Minute (40-180). Fallback param.' },
+            waveform: { type: Type.STRING, description: 'Oscillator type. Fallback param.' },
+            filterFreq: { type: Type.NUMBER, description: 'Filter frequency. Fallback param.' },
+            arpeggio: { type: Type.BOOLEAN, description: 'Enable arpeggios. Fallback param.' },
+            drums: { type: Type.BOOLEAN, description: 'Enable drums. Fallback param.' }
           },
-          required: ['style'],
+          required: ['prompt'],
         },
       },
       {
@@ -75,15 +79,12 @@ export class GeminiLiveService {
   private source: MediaStreamAudioSourceNode | null = null;
   private sessionPromise: Promise<any> | null = null; 
   private isMicMuted: boolean = true;
-  private lastCallTime: number = 0;
   private duckingTimeout: number | null = null;
   
-  // ElevenLabs
-  private elConfig: ElevenLabsConfig | null = null;
-  private elClient: ElevenLabsClient | null = null;
+  public elConfig: ElevenLabsConfig | null = null;
+  public elClient: ElevenLabsClient | null = null;
   private transcriptBuffer: string = "";
   
-  // Callbacks
   public onAudioData: ((amplitude: number) => void) | null = null;
   public onTranscript: ((text: string, isUser: boolean) => void) | null = null;
   public onToolCall: ((name: string, args: any) => Promise<any>) | null = null;
@@ -97,8 +98,11 @@ export class GeminiLiveService {
   async connect(locationInfo: string, elConfig?: ElevenLabsConfig) {
     this.elConfig = elConfig || null;
     
+    // Input must be 16k for Gemini
     this.inputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-    this.outputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+    
+    // Output uses system default (usually 44.1k or 48k) for best quality with ElevenLabs
+    this.outputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
     
     if (this.elConfig && this.outputAudioContext) {
         this.elClient = new ElevenLabsClient(this.elConfig.apiKey, this.elConfig.voiceId, this.outputAudioContext);
@@ -124,21 +128,19 @@ export class GeminiLiveService {
       - Vibe: Late-night vintage radio warmth. You are always "live" on the air.
       
       MUSIC HANDLING:
-      - The station creates its own generative music.
-      - You control the synth using 'setMusicStyle'. 
-      - Supported styles: Lofi, Rock, Techno, Classical, Ambient.
-      - If user asks for music, change the style using the tool.
-      - Never say you can't play music. You ARE the music controller.
-
+      - The user prefers High Quality AI Music (ElevenLabs).
+      - When the user requests a song/genre, YOU MUST use the 'generateMusic' tool.
+      - CRITICAL: You MUST provide a rich 'prompt' string for the music generator.
+        - GOOD: "relaxing lofi hip hop beat with rain sounds"
+        - GOOD: "fast paced dark techno cyberpunk loop"
+        - GOOD: "smooth jazz piano trio improvisation"
+      - Do not just ask what they want—suggest ideas or just play something great.
+      
       INTERACTION MODEL:
       - The user is a "Caller" calling into the station.
       - IMPORTANT: When you receive the text "[PHONE RINGS...]", you MUST act out answering the phone immediately.
-      - Example Answer: "Focus FM, you're live on the air! Who am I speaking with?"
+      - REQUIRED GREETING: "Focus FM, you're live on the air! Who's joining us today?"
       - Be snappy. Don't wait.
-      
-      RULES:
-      - Keep responses snappy and radio-friendly.
-      - Never break character. You are NOT an AI assistant. You are a Radio Host.
     `;
 
     const config: any = {
@@ -197,7 +199,7 @@ export class GeminiLiveService {
 
   private triggerRing() {
       if (this.sessionPromise) {
-          this.sendText("RING RING! [PHONE RINGS - PICK UP IMMEDIATELY AND SAY HELLO]");
+          this.sendText("SYSTEM: [PHONE RINGS] Answer immediately with exactly: 'Focus FM, you're live on the air! Who's joining us today?'");
       }
   }
 
@@ -324,6 +326,8 @@ export class GeminiLiveService {
 
   private async scheduleAudioChunk(pcmData: Uint8Array) {
       if (!this.outputAudioContext) return;
+      // Decode raw 24000Hz PCM into the native audio context (e.g. 48000Hz)
+      // The browser handles resampling here
       const audioBuffer = await decodeAudioData(pcmData, this.outputAudioContext, 24000);
       this.playBuffer(audioBuffer);
   }

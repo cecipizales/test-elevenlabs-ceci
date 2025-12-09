@@ -20,7 +20,6 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
-// Convert Float32 audio data (Web Audio API standard) to PCM Int16 (Gemini requirement)
 export function float32ToInt16(float32Array: Float32Array): Int16Array {
   const int16Array = new Int16Array(float32Array.length);
   for (let i = 0; i < float32Array.length; i++) {
@@ -46,6 +45,7 @@ export async function decodeAudioData(
 ): Promise<AudioBuffer> {
   const dataInt16 = new Int16Array(data.buffer);
   const frameCount = dataInt16.length / numChannels;
+  // Create buffer with specific sample rate. Browser handles playback resampling.
   const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
 
   for (let channel = 0; channel < numChannels; channel++) {
@@ -56,8 +56,6 @@ export async function decodeAudioData(
   }
   return buffer;
 }
-
-// --- Audio Effects & Generative Music ---
 
 export class AudioSynthesizer {
   public ctx: AudioContext;
@@ -89,8 +87,44 @@ export class AudioSynthesizer {
     noise.start();
   }
 
-  playPhoneRing() {
-    // Short, single ring for snappy pickup
+  playDTMFSequence() {
+      const now = this.ctx.currentTime;
+      // 4 tones - Normal dialing speed
+      const tones = [
+          [697, 1209], // 1
+          [697, 1477], // 3
+          [770, 1336], // 5
+          [852, 1477]  // 9
+      ];
+      
+      tones.forEach((freqs, i) => {
+          const osc1 = this.ctx.createOscillator();
+          const osc2 = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          
+          osc1.type = 'sine';
+          osc2.type = 'sine';
+          osc1.frequency.value = freqs[0];
+          osc2.frequency.value = freqs[1];
+          
+          const startTime = now + (i * 0.15); // Normal sequence
+          const duration = 0.1; 
+          
+          gain.gain.setValueAtTime(0.1, startTime);
+          gain.gain.linearRampToValueAtTime(0, startTime + duration);
+          
+          osc1.connect(gain);
+          osc2.connect(gain);
+          gain.connect(this.ctx.destination);
+          
+          osc1.start(startTime);
+          osc2.start(startTime);
+          osc1.stop(startTime + duration);
+          osc2.stop(startTime + duration);
+      });
+  }
+
+  playPhoneRing(delay = 0) {
     const o1 = this.ctx.createOscillator();
     const o2 = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
@@ -104,14 +138,27 @@ export class AudioSynthesizer {
     o2.connect(gain);
     gain.connect(this.ctx.destination);
 
-    gain.gain.setValueAtTime(0, this.ctx.currentTime);
-    gain.gain.linearRampToValueAtTime(0.1, this.ctx.currentTime + 0.1);
-    gain.gain.linearRampToValueAtTime(0, this.ctx.currentTime + 1.5);
+    const startTime = this.ctx.currentTime + delay;
 
-    o1.start();
-    o2.start();
-    o1.stop(this.ctx.currentTime + 1.5);
-    o2.stop(this.ctx.currentTime + 1.5);
+    gain.gain.setValueAtTime(0, startTime);
+    gain.gain.linearRampToValueAtTime(0.1, startTime + 0.1);
+    gain.gain.linearRampToValueAtTime(0.1, startTime + 1.8);
+    gain.gain.linearRampToValueAtTime(0, startTime + 2.0); 
+
+    o1.start(startTime);
+    o2.start(startTime);
+    o1.stop(startTime + 2.0);
+    o2.stop(startTime + 2.0);
+
+    return () => {
+        try {
+            o1.stop();
+            o2.stop();
+            gain.disconnect();
+        } catch (e) {
+            // ignore
+        }
+    };
   }
 
   playHourChime() {
@@ -122,12 +169,10 @@ export class AudioSynthesizer {
       osc.connect(gain);
       gain.connect(this.ctx.destination);
       
-      // Beep 1
       osc.frequency.setValueAtTime(880, t);
       gain.gain.setValueAtTime(0.1, t);
       gain.gain.setValueAtTime(0, t + 0.1);
       
-      // Beep 2 (High)
       osc.frequency.setValueAtTime(1760, t + 0.2);
       gain.gain.setValueAtTime(0.1, t + 0.2);
       gain.gain.setValueAtTime(0, t + 0.6);
@@ -135,42 +180,47 @@ export class AudioSynthesizer {
       osc.start(t);
       osc.stop(t + 0.6);
   }
-
-  playClick() {
-     const osc = this.ctx.createOscillator();
-     const gain = this.ctx.createGain();
-     osc.connect(gain);
-     gain.connect(this.ctx.destination);
-     
-     osc.frequency.setValueAtTime(150, this.ctx.currentTime);
-     gain.gain.setValueAtTime(0.1, this.ctx.currentTime);
-     gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.1);
-     
-     osc.start();
-     osc.stop(this.ctx.currentTime + 0.1);
-  }
 }
 
-// --- Procedural Lo-Fi Engine ---
+export interface SynthConfig {
+  bpm: number;              
+  waveform: OscillatorType; 
+  filterFreq: number;       
+  arpeggio: boolean;
+  drums: boolean;
+  notesDensity: number;     
+}
 
 export class LoFiSynth {
   private ctx: AudioContext;
   private masterGain: GainNode;
   private isPlaying: boolean = false;
   private nextNoteTime: number = 0;
-  private style: string = 'lofi'; // lofi, rock, techno, classical, ambient
+  private config: SynthConfig = {
+    bpm: 60, // Slower default for chill vibes
+    waveform: 'triangle',
+    filterFreq: 600,
+    arpeggio: false,
+    drums: true,
+    notesDensity: 0.7
+  };
   private timerID: number | null = null;
   private lookahead = 25.0; 
   private scheduleAheadTime = 0.1; 
   public analyser: AnalyserNode;
+  private autoChangeTimeout: number | null = null;
+  private vinylSource: AudioBufferSourceNode | null = null;
 
-  // Parameters
+  // Hybrid Mode (External Loop)
+  private loopSource: AudioBufferSourceNode | null = null;
+  private activeLoopBuffer: AudioBuffer | null = null;
+  private isLoopMode: boolean = false;
+
   private transposeSteps: number = 0;
   private baseVolume: number = 0.3;
   private userVolume: number = 1.0; 
   private isDucking: boolean = false;
 
-  // Chords (Roots in Hz)
   private baseChords = [
     [261.63, 329.63, 392.00, 493.88], // Cmaj7
     [293.66, 349.23, 440.00, 523.25], // Dm7
@@ -196,27 +246,98 @@ export class LoFiSynth {
     if (this.isPlaying) return;
     if (this.ctx.state === 'suspended') this.ctx.resume();
     this.isPlaying = true;
-    this.nextNoteTime = this.ctx.currentTime;
     
-    this.scheduler();
-    this.startVinylCrackles();
+    if (this.isLoopMode && this.activeLoopBuffer) {
+        this.startLoopPlayback(this.activeLoopBuffer);
+    } else {
+        this.nextNoteTime = this.ctx.currentTime;
+        this.scheduler();
+        this.startVinylCrackles();
+        this.scheduleAutoChange();
+    }
   }
 
   stop() {
     this.isPlaying = false;
     if (this.timerID) window.clearTimeout(this.timerID);
+    if (this.autoChangeTimeout) window.clearTimeout(this.autoChangeTimeout);
+    
+    if (this.loopSource) {
+        try { this.loopSource.stop(); } catch(e) {}
+        this.loopSource = null;
+    }
+
+    if (this.vinylSource) {
+        try { this.vinylSource.stop(); } catch(e) {}
+        this.vinylSource = null;
+    }
+
     this.masterGain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 1);
   }
 
-  setMusicStyle(style: string) {
-    const s = style.toLowerCase();
-    if (s.includes('rock')) this.style = 'rock';
-    else if (s.includes('techno') || s.includes('house')) this.style = 'techno';
-    else if (s.includes('classical') || s.includes('piano')) this.style = 'classical';
-    else if (s.includes('ambient') || s.includes('focus')) this.style = 'ambient';
-    else this.style = 'lofi';
-    
-    this.changeSong(); // Trigger immediate visual change
+  // --- External Loop Mode (ElevenLabs) ---
+  setExternalLoop(buffer: AudioBuffer) {
+      this.isLoopMode = true;
+      this.activeLoopBuffer = buffer;
+
+      // Stop internal synth stuff
+      if (this.timerID) {
+          window.clearTimeout(this.timerID);
+          this.timerID = null;
+      }
+      if (this.autoChangeTimeout) {
+          window.clearTimeout(this.autoChangeTimeout);
+          this.autoChangeTimeout = null;
+      }
+      
+      this.startLoopPlayback(buffer);
+  }
+
+  switchToInternalSynth() {
+      this.isLoopMode = false;
+      this.activeLoopBuffer = null;
+      if (this.loopSource) {
+          try { this.loopSource.stop(); } catch(e) {}
+          this.loopSource = null;
+      }
+      
+      if (this.isPlaying) {
+          this.nextNoteTime = this.ctx.currentTime;
+          this.scheduler();
+          this.scheduleAutoChange();
+      }
+  }
+
+  private startLoopPlayback(buffer: AudioBuffer) {
+      if (!this.isPlaying) return;
+      
+      if (this.loopSource) {
+          try { this.loopSource.stop(); } catch(e) {}
+      }
+
+      const src = this.ctx.createBufferSource();
+      src.buffer = buffer;
+      src.loop = true;
+      src.connect(this.masterGain);
+      src.start();
+      this.loopSource = src;
+  }
+
+  // --- Internal Synth Methods ---
+
+  configure(params: Partial<SynthConfig>) {
+      if (this.isLoopMode) this.switchToInternalSynth();
+
+      this.config = { ...this.config, ...params };
+      if (!this.config.bpm || this.config.bpm < 30) this.config.bpm = 60;
+      if (!this.config.waveform) this.config.waveform = 'triangle';
+
+      if (this.isPlaying && !this.isLoopMode) {
+          if (this.timerID) window.clearTimeout(this.timerID);
+          this.nextNoteTime = this.ctx.currentTime + 0.1; 
+          this.scheduler();
+      }
+      this.transposeSteps = Math.floor(Math.random() * 12) - 5;
   }
 
   setMasterVolume(vol: number) {
@@ -227,7 +348,7 @@ export class LoFiSynth {
   duck(active: boolean) {
       if (this.isDucking === active) return;
       this.isDucking = active;
-      this.updateGain(0.8); // Slower ramp for ducking
+      this.updateGain(0.8); 
   }
 
   private updateGain(rampTime: number = 0.1) {
@@ -238,28 +359,35 @@ export class LoFiSynth {
   }
 
   changeSong() {
-      // Just change key/params immediately, no pause
+      if (this.isLoopMode) return; 
+
       this.transposeSteps = Math.floor(Math.random() * 12) - 5;
+      const bpmShift = Math.random() * 10 - 5;
+      const currentBpm = this.config.bpm || 60;
+      this.config.bpm = Math.max(40, Math.min(120, currentBpm + bpmShift));
+      
+      this.scheduleAutoChange();
+  }
+
+  private scheduleAutoChange() {
+      if (this.autoChangeTimeout) window.clearTimeout(this.autoChangeTimeout);
+      const delay = (90 + Math.random() * 60) * 1000;
+      this.autoChangeTimeout = window.setTimeout(() => this.changeSong(), delay);
   }
 
   private scheduler() {
-    if (!this.isPlaying) return;
+    if (!this.isPlaying || this.isLoopMode) return;
+    
+    if (!this.config.bpm || this.config.bpm <= 0) {
+        this.config.bpm = 60;
+    }
 
     while (this.nextNoteTime < this.ctx.currentTime + this.scheduleAheadTime) {
       this.scheduleNote(this.nextNoteTime);
-      this.nextNoteTime += this.getNoteDuration();
+      const secondsPerBeat = 60.0 / this.config.bpm;
+      this.nextNoteTime += secondsPerBeat;
     }
     this.timerID = window.setTimeout(() => this.scheduler(), this.lookahead);
-  }
-
-  private getNoteDuration() {
-    switch (this.style) {
-      case 'techno': return 0.4; // Fast
-      case 'rock': return 1.0; 
-      case 'classical': return 1.5;
-      case 'ambient': return 4.0;
-      case 'lofi': default: return 3.0;
-    }
   }
 
   private transpose(freq: number): number {
@@ -267,115 +395,61 @@ export class LoFiSynth {
   }
 
   private scheduleNote(time: number) {
-    // 1. CHORDS / MELODY
     const rawChord = this.baseChords[Math.floor(Math.random() * this.baseChords.length)];
     const transposedChord = rawChord.map(f => this.transpose(f));
     this.playChord(transposedChord, time);
 
-    // 2. DRUMS
-    const beatTime = this.getNoteDuration() / 4;
-    
-    // Kick
-    if (this.style === 'techno') {
-        // 4 on the floor
-        for(let i=0; i<4; i++) this.playKick(time + beatTime * i);
-    } else if (this.style === 'rock') {
+    if (this.config.drums) {
+        const beatDuration = (60.0 / this.config.bpm);
         this.playKick(time);
-        this.playKick(time + beatTime * 2.5);
-    } else if (this.style === 'ambient') {
-        // Sparse kick
-        if (Math.random() > 0.5) this.playKick(time);
-    } else {
-        // Lofi standard
-        this.playKick(time);
-    }
-    
-    // Snare/Clap
-    if (this.style === 'techno') {
-        this.playSnare(time + beatTime); // Offbeat
-        this.playSnare(time + beatTime * 3);
-    } else if (this.style !== 'ambient' && this.style !== 'classical') {
-        this.playSnare(time + beatTime * 2);
-    }
-    
-    // HiHats
-    if (this.style !== 'classical') {
-        const subdivs = this.style === 'techno' ? 8 : 4;
-        const hatTime = this.getNoteDuration() / subdivs;
-        for(let i=0; i<subdivs; i++) {
-            if (Math.random() > 0.3) {
-                this.playHiHat(time + hatTime * i + (Math.random() * 0.02)); 
-            }
+        this.playSnare(time + beatDuration / 2);
+        if (Math.random() > 0.5) {
+             this.playHiHat(time + beatDuration / 4);
+             this.playHiHat(time + (beatDuration * 3) / 4);
         }
     }
   }
 
   private playChord(freqs: number[], time: number) {
     const gain = this.ctx.createGain();
-    const duration = this.getNoteDuration();
+    const duration = (60.0 / this.config.bpm) * (this.config.arpeggio ? 0.25 : 4.0);
     
-    // Envelope
     gain.gain.setValueAtTime(0, time);
-    if (this.style === 'rock') {
-        gain.gain.linearRampToValueAtTime(0.2, time + 0.05);
-        gain.gain.exponentialRampToValueAtTime(0.01, time + duration * 0.5);
-    } else if (this.style === 'classical') {
-        // Arpeggio feel - play notes staggered
-        // But for simplicity in this function, just softer attack
-        gain.gain.linearRampToValueAtTime(0.15, time + 0.5);
-        gain.gain.exponentialRampToValueAtTime(0.01, time + duration);
-    } else {
-        gain.gain.linearRampToValueAtTime(0.15, time + 0.5); 
-        gain.gain.exponentialRampToValueAtTime(0.01, time + duration); 
-    }
+    gain.gain.linearRampToValueAtTime(0.15, time + 0.1);
+    gain.gain.exponentialRampToValueAtTime(0.01, time + duration);
 
     const filter = this.ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.value = this.style === 'rock' ? 2000 : (this.style === 'techno' ? 3000 : 800);
+    filter.frequency.value = this.config.filterFreq;
 
     gain.connect(filter);
     filter.connect(this.masterGain);
 
     freqs.forEach((f, i) => {
       const osc = this.ctx.createOscillator();
-      
-      // Osc Types per Genre
-      if (this.style === 'rock') osc.type = 'sawtooth';
-      else if (this.style === 'techno') osc.type = 'square';
-      else if (this.style === 'classical') osc.type = 'sine';
-      else osc.type = 'triangle'; // Lofi/Ambient
-
+      osc.type = this.config.waveform;
       osc.frequency.value = f;
-      // Slight detune
-      osc.detune.value = Math.random() * 10 - 5; 
+      osc.detune.value = this.config.waveform === 'sine' ? 0 : (Math.random() * 10 - 5);
       
-      // Stagger classical notes
-      const startT = this.style === 'classical' ? time + (i * 0.1) : time;
+      const startT = this.config.arpeggio ? time + (i * 0.1) : time;
       
       osc.connect(gain);
       osc.start(startT);
-      osc.stop(time + duration);
+      osc.stop(time + duration + 0.5);
     });
   }
 
   private playKick(time: number) {
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
-    
-    const freqStart = this.style === 'techno' ? 100 : (150 + (this.transposeSteps * 2));
-    const decay = this.style === 'techno' ? 0.3 : 0.5;
-
-    osc.frequency.setValueAtTime(freqStart, time);
-    osc.frequency.exponentialRampToValueAtTime(0.01, time + decay);
-    
+    osc.frequency.setValueAtTime(150, time);
+    osc.frequency.exponentialRampToValueAtTime(0.01, time + 0.5);
     gain.gain.setValueAtTime(0.8, time);
-    gain.gain.exponentialRampToValueAtTime(0.01, time + decay);
-
+    gain.gain.exponentialRampToValueAtTime(0.01, time + 0.5);
     osc.connect(gain);
     gain.connect(this.masterGain);
-    
     osc.start(time);
-    osc.stop(time + decay);
+    osc.stop(time + 0.5);
   }
 
   private playSnare(time: number) {
@@ -387,16 +461,15 @@ export class LoFiSynth {
 
     const filter = this.ctx.createBiquadFilter();
     filter.type = 'bandpass';
-    filter.frequency.value = this.style === 'rock' ? 2000 : 1500;
+    filter.frequency.value = 1500;
 
     const gain = this.ctx.createGain();
-    gain.gain.setValueAtTime(0.5, time);
+    gain.gain.setValueAtTime(0.4, time);
     gain.gain.exponentialRampToValueAtTime(0.01, time + 0.2);
 
     noise.connect(filter);
     filter.connect(gain);
     gain.connect(this.masterGain);
-    
     noise.start(time);
   }
 
@@ -407,53 +480,41 @@ export class LoFiSynth {
     for (let i = 0; i < bufferSize; i++) {
       data[i] = Math.random() * 2 - 1;
     }
-
     const noise = this.ctx.createBufferSource();
     noise.buffer = buffer;
-
     const filter = this.ctx.createBiquadFilter();
     filter.type = 'highpass';
     filter.frequency.value = 6000;
-
     const gain = this.ctx.createGain();
     gain.gain.setValueAtTime(0.1, time);
     gain.gain.exponentialRampToValueAtTime(0.01, time + 0.05);
-
     noise.connect(filter);
     filter.connect(gain);
     gain.connect(this.masterGain);
-    
     noise.start(time);
   }
 
   private startVinylCrackles() {
+     if (this.vinylSource) return;
      const bufferSize = this.ctx.sampleRate * 5;
      const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
      const data = buffer.getChannelData(0);
-     
-     // Simple brown noise approx
      let lastOut = 0;
      for (let i = 0; i < bufferSize; i++) {
         const white = Math.random() * 2 - 1;
         data[i] = (lastOut + (0.02 * white)) / 1.02;
         lastOut = data[i];
         data[i] *= 3.5; 
-        
-        // Occasional Pop
-        if (Math.random() > 0.9995) {
-            data[i] += Math.random() * 0.5;
-        }
+        if (Math.random() > 0.9995) data[i] += Math.random() * 0.5;
      }
-
      const noise = this.ctx.createBufferSource();
      noise.buffer = buffer;
      noise.loop = true;
-     
      const gain = this.ctx.createGain();
      gain.gain.value = 0.1;
-     
      noise.connect(gain);
      gain.connect(this.masterGain);
      noise.start();
+     this.vinylSource = noise;
   }
 }

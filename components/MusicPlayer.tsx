@@ -3,9 +3,10 @@ import React, { useEffect, useRef } from 'react';
 interface MusicPlayerProps {
   isPlaying: boolean;
   synthAnalyser?: AnalyserNode;
+  generationStatus?: 'idle' | 'generating' | 'error';
 }
 
-const MusicPlayer: React.FC<MusicPlayerProps> = ({ isPlaying, synthAnalyser }) => {
+const MusicPlayer: React.FC<MusicPlayerProps> = ({ isPlaying, synthAnalyser, generationStatus = 'idle' }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>(0);
 
@@ -33,7 +34,24 @@ const MusicPlayer: React.FC<MusicPlayerProps> = ({ isPlaying, synthAnalyser }) =
       for(let i=0; i<canvas.height; i+=20) { ctx.moveTo(0, i); ctx.lineTo(canvas.width, i); }
       ctx.stroke();
 
-      if (isPlaying && synthAnalyser) {
+      if (generationStatus === 'generating') {
+          // FLASHING LOADING TEXT
+          const t = Date.now();
+          if (Math.floor(t / 500) % 2 === 0) {
+              ctx.font = '14px "JetBrains Mono"';
+              ctx.fillStyle = '#f59e0b'; // Bright Amber
+              ctx.textAlign = 'center';
+              ctx.fillText("GENERATING TAPE...", canvas.width/2, canvas.height/2);
+          }
+      } else if (generationStatus === 'error') {
+          // ERROR TEXT
+          ctx.font = '14px "JetBrains Mono"';
+          ctx.fillStyle = '#ef4444'; // Red
+          ctx.textAlign = 'center';
+          ctx.fillText("TAPE ERROR", canvas.width/2, canvas.height/2);
+          ctx.font = '10px "JetBrains Mono"';
+          ctx.fillText("USING BACKUP SYNTH", canvas.width/2, canvas.height/2 + 15);
+      } else if (isPlaying && synthAnalyser) {
           synthAnalyser.getByteFrequencyData(dataArray);
           
           const barWidth = (canvas.width / dataArray.length) * 2.5;
@@ -61,7 +79,8 @@ const MusicPlayer: React.FC<MusicPlayerProps> = ({ isPlaying, synthAnalyser }) =
           // Paused Text
           ctx.font = '12px "JetBrains Mono"';
           ctx.fillStyle = '#d97706';
-          ctx.fillText("SYNTH OFFLINE", canvas.width/2 - 45, canvas.height/2);
+          ctx.textAlign = 'center';
+          ctx.fillText("SYNTH OFFLINE", canvas.width/2, canvas.height/2);
       }
 
       // Scanline
@@ -74,7 +93,7 @@ const MusicPlayer: React.FC<MusicPlayerProps> = ({ isPlaying, synthAnalyser }) =
     render();
 
     return () => cancelAnimationFrame(animationRef.current);
-  }, [isPlaying, synthAnalyser]);
+  }, [isPlaying, synthAnalyser, generationStatus]);
 
   return (
     <div className="w-full h-full bg-black relative">

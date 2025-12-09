@@ -33,7 +33,7 @@ export class ElevenLabsClient {
       );
 
       if (!response.ok) {
-        console.error("ElevenLabs API Error", await response.text());
+        console.error("ElevenLabs API Error (TTS)", await response.text());
         return null;
       }
 
@@ -43,6 +43,41 @@ export class ElevenLabsClient {
 
     } catch (err) {
       console.error("ElevenLabs Streaming Failed", err);
+      return null;
+    }
+  }
+
+  async generateSoundLoop(text: string): Promise<AudioBuffer | null> {
+    if (!text.trim()) return null;
+
+    try {
+      const response = await fetch(
+        `https://api.elevenlabs.io/v1/sound-generation`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'xi-api-key': this.apiKey,
+          },
+          body: JSON.stringify({
+            text,
+            duration_seconds: 10,
+            prompt_influence: 0.5,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        console.error("ElevenLabs API Error (Sound Gen)", await response.text());
+        return null;
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
+      return audioBuffer;
+
+    } catch (err) {
+      console.error("ElevenLabs Sound Gen Failed", err);
       return null;
     }
   }
